@@ -33,6 +33,7 @@ class VideoLabel(QLabel):
         self.drawing = False
         self.show_rect = False
         self.rect = None  # QRectF in widget coordinates
+        self.roi_changed = None  # Callback function when ROI changes
 
     def mousePressEvent(self, event):
         if self.show_rect and event.button() == Qt.LeftButton:
@@ -52,6 +53,9 @@ class VideoLabel(QLabel):
             self.drawing = False
             self._update_rect()
             self.update()
+            # Trigger callback when ROI is changed
+            if self.roi_changed is not None:
+                self.roi_changed()
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -123,6 +127,11 @@ class MainWindow(QMainWindow):
         # Flip state
         self.flip_enabled = True  # Default to flipped (current behavior)
         
+        # Image mode state
+        self.image_mode = False  # False = video mode, True = image mode
+        self.loaded_image = None  # Store loaded image
+        self.loaded_image_path = None
+        
         # HSV filter thresholds (S and V channels, H is fixed per range)
         self.lower_s = 40
         self.lower_v = 40
@@ -147,6 +156,7 @@ class MainWindow(QMainWindow):
         self.video_label.setMaximumSize(640, 480)
         self.video_label.setFrameStyle(QFrame.Box | QFrame.Raised)
         self.video_label.setStyleSheet("QLabel { background-color: black; }")
+        self.video_label.roi_changed = self.on_roi_changed  # Connect ROI change callback
 
         # Toolbar
         toolbar = QToolBar("Main")
@@ -164,6 +174,17 @@ class MainWindow(QMainWindow):
         self.flip_action.setChecked(True)  # Start with flip enabled
         self.flip_action.triggered.connect(self.toggle_flip)
         toolbar.addAction(self.flip_action)
+        
+        # Upload Image button
+        upload_image_action = QAction("📁 Upload Image", self)
+        upload_image_action.triggered.connect(self.upload_image)
+        toolbar.addAction(upload_image_action)
+        
+        # Switch mode button (video/image)
+        self.switch_mode_action = QAction("🔀 Switch to Image", self)
+        self.switch_mode_action.triggered.connect(self.switch_mode)
+        self.switch_mode_action.setEnabled(False)  # Disabled until image is loaded
+        toolbar.addAction(self.switch_mode_action)
 
         # Snapshot button
         snap_action = QAction("📷 Snapshot", self)
@@ -375,21 +396,123 @@ class MainWindow(QMainWindow):
         """Toggle horizontal flip of video frames."""
         self.flip_enabled = checked
     
+    def upload_image(self):
+        """Browse for an image file and load it."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Upload Image",
+            os.getcwd(),
+            "Image Files (*.png *.jpg *.jpeg *.bmp *.tiff *.avif);;All Files (*)"
+        )
+        
+        if file_path:
+            # Load the image
+            img = cv2.imread(file_path)
+            if img is None:
+                QMessageBox.warning(self, "Error", "Failed to load image file.")
+                return
+            
+            self.loaded_image = img
+            self.loaded_image_path = file_path
+            self.switch_mode_action.setEnabled(True)
+            
+            # Automatically switch to image mode
+            self.image_mode = True
+            self.switch_mode_action.setText("🔀 Switch to Video")
+            
+            # Process and display the image
+            self.process_current_source()
+            
+            print(f"Loaded image: {file_path}")
+            QMessageBox.information(self, "Image Loaded", 
+                                   f"Image loaded successfully:\n{os.path.basename(file_path)}\n\nNow in Image Mode.")
+    
+    def switch_mode(self):
+        """Switch between video and image mode."""
+        if self.loaded_image is None:
+            QMessageBox.warning(self, "No Image", "Please upload an image first.")
+            return
+        
+        self.image_mode = not self.image_mode
+        
+        if self.image_mode:
+            self.switch_mode_action.setText("🔀 Switch to Video")
+            print("Switched to Image Mode")
+        else:
+            self.switch_mode_action.setText("🔀 Switch to Image")
+            print("Switched to Video Mode")
+        
+        # Process the current source
+        self.process_current_source()
+    
+    def process_current_source(self):
+        """Process either video frame or loaded image based on current mode."""
+        if self.image_mode and self.loaded_image is not None:
+            # Process loaded image
+            frame = self.loaded_image.copy()
+            
+            # Apply HSV filtering
+            if self.hsv_buffer is None or self.hsv_buffer.shape != frame.shape:
+                self.hsv_buffer = np.empty_like(frame)
+            
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV, dst=self.hsv_buffer)
+            
+            # Create masks
+            mask1 = cv2.inRange(hsv, np.array([0, self.lower_s, self.lower_v]), np.array([25, self.upper_s, self.upper_v]))
+            mask2 = cv2.inRange(hsv, np.array([25, self.lower_s, self.lower_v]), np.array([85, self.upper_s, self.upper_v]))
+            mask3 = cv2.inRange(hsv, np.array([85, self.lower_s, self.lower_v]), np.array([160, self.upper_s, self.upper_v]))
+            mask4 = cv2.inRange(hsv, np.array([160, self.lower_s, self.lower_v]), np.array([180, self.upper_s, self.upper_v]))
+            
+            mask = mask1 | mask2 | mask3 | mask4
+            
+            kernel = np.ones((3, 3), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+            
+            spectrum_only = cv2.bitwise_and(frame, frame, mask=mask)
+            
+            # Flip if enabled
+            if self.flip_enabled:
+                processed = cv2.flip(spectrum_only, 1)
+            else:
+                processed = spectrum_only
+            
+            self.current_frame = processed.copy()
+            self._display_frame(processed)
+            
+            # Get ROI if crop box is enabled
+            roi = None
+            if self.video_label.show_rect and self.video_label.rect is not None:
+                roi = self.video_label.get_roi_on_frame(frame.shape)
+            
+            # Analyze spectrum
+            res = self.analyzer.process_and_update(processed, roi=roi, auto_detect=(roi is None),
+                                                   intensity_method='average', channel='gray',
+                                                   update_plot=False)
+            self._update_plot(res['wavelengths'], res['intensities'])
+    
     def _update_lower_s(self, value):
         self.lower_s = value
         self.lower_s_value_label.setText(str(value))
+        if self.image_mode:
+            self.process_current_source()
     
     def _update_lower_v(self, value):
         self.lower_v = value
         self.lower_v_value_label.setText(str(value))
+        if self.image_mode:
+            self.process_current_source()
     
     def _update_upper_s(self, value):
         self.upper_s = value
         self.upper_s_value_label.setText(str(value))
+        if self.image_mode:
+            self.process_current_source()
     
     def _update_upper_v(self, value):
         self.upper_v = value
         self.upper_v_value_label.setText(str(value))
+        if self.image_mode:
+            self.process_current_source()
 
     def save_snapshot(self):
         if self.current_frame is None:
@@ -464,10 +587,17 @@ class MainWindow(QMainWindow):
         self.frozen_intensities = None
         print("Frozen spectrum cleared")
 
+    def on_roi_changed(self):
+        """Called when the crop box ROI is changed by the user."""
+        if self.image_mode:
+            self.process_current_source()
+    
     def toggle_crop_box(self, checked):
         self.video_label.show_rect = checked
         if not checked:
             self.video_label.clear_rect()
+            if self.image_mode:
+                self.process_current_source()  # Update when crop box is disabled
 
     def toggle_fold(self, checked):
         # If checked -> hide video (fold), else show
@@ -700,6 +830,10 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def next_frame(self):
+        # Skip video processing if in image mode
+        if self.image_mode:
+            return
+        
         ret, frame = self.cap.read()
         if not ret:
             return
