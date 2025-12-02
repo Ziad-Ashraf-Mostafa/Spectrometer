@@ -4,6 +4,7 @@ import glob
 import re
 import cv2
 import numpy as np
+from scipy.signal import find_peaks
 from SpectrumAnalyzer import SpectrumAnalyzer
 
 # PySide6 GUI imports
@@ -11,7 +12,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, 
     QVBoxLayout, QHBoxLayout, QToolBar, QSplitter, QSizePolicy, QFrame,
     QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QMessageBox,
-    QFileDialog, QSlider, QGroupBox
+    QFileDialog, QSlider, QGroupBox, QMenuBar, QMenu
 )
 from PySide6.QtCore import Qt, QTimer, QRectF
 from PySide6.QtGui import QImage, QPixmap, QAction
@@ -108,11 +109,14 @@ class VideoLabel(QLabel):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, video_url):
+    def __init__(self, default_video_url=None):
         super().__init__()
-        self.setWindowTitle("Spectrometer Live Analyzer")
-        self.video_url = video_url
-        self.cap = cv2.VideoCapture(self.video_url)
+        self.setWindowTitle("Spectrometer Analyzer")
+        self.default_video_url = default_video_url or "http://192.168.137.41:8080//video"
+        self.video_url = None
+        self.cap = None
+        self.image_mode = False  # Flag for static image vs video stream
+        self.static_image = None  # Store loaded image
         
         # Calibration state
         self.calibration_mode = False
@@ -128,6 +132,13 @@ class MainWindow(QMainWindow):
         self.lower_v = 40
         self.upper_s = 255
         self.upper_v = 255
+        
+        # Peak detection state
+        self.detect_two_peaks = False
+        self.peak_lines = []  # Store peak line artists
+        self.peak_texts = []  # Store peak text artists
+        self.peak_wavelengths = []  # Store current peak wavelengths
+        self.hovered_peak_index = None  # Track which peak is being hovered
         
         # Initialize analyzer with loaded or default calibration
         if len(self.calibration_points) >= 2:
@@ -148,67 +159,124 @@ class MainWindow(QMainWindow):
         self.video_label.setFrameStyle(QFrame.Box | QFrame.Raised)
         self.video_label.setStyleSheet("QLabel { background-color: black; }")
 
-        # Toolbar
-        toolbar = QToolBar("Main")
-        self.addToolBar(toolbar)
-
-        # Pause / Resume button -> toggles pause
+        # Create Menu Bar with organized menus
+        menubar = self.menuBar()
+        
+        # File Menu
+        file_menu = menubar.addMenu("&File")
+        
+        load_image_action = QAction("🖼️ Load Image...", self)
+        load_image_action.setShortcut("Ctrl+O")
+        load_image_action.triggered.connect(self.load_image)
+        file_menu.addAction(load_image_action)
+        
+        open_stream_action = QAction("📹 Open Video Stream...", self)
+        open_stream_action.setShortcut("Ctrl+Shift+O")
+        open_stream_action.triggered.connect(self.change_video_url)
+        file_menu.addAction(open_stream_action)
+        
+        file_menu.addSeparator()
+        
+        snap_action = QAction("📷 Save Snapshot", self)
+        snap_action.setShortcut("Ctrl+S")
+        snap_action.triggered.connect(self.save_snapshot)
+        file_menu.addAction(snap_action)
+        
+        save_spectrum_action = QAction("💾 Save Spectrum", self)
+        save_spectrum_action.setShortcut("Ctrl+Shift+S")
+        save_spectrum_action.triggered.connect(self.save_spectrum)
+        file_menu.addAction(save_spectrum_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction("E&xit", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # View Menu
+        view_menu = menubar.addMenu("&View")
+        
         self.pause_action = QAction("⏸ Pause", self)
         self.pause_action.setCheckable(True)
+        self.pause_action.setShortcut("Space")
         self.pause_action.triggered.connect(self.toggle_pause)
-        toolbar.addAction(self.pause_action)
+        view_menu.addAction(self.pause_action)
         
-        # Flip toggle button
-        self.flip_action = QAction("🔄 Flip", self)
+        self.flip_action = QAction("🔄 Flip Horizontal", self)
         self.flip_action.setCheckable(True)
-        self.flip_action.setChecked(True)  # Start with flip enabled
+        self.flip_action.setChecked(True)
+        self.flip_action.setShortcut("Ctrl+F")
         self.flip_action.triggered.connect(self.toggle_flip)
-        toolbar.addAction(self.flip_action)
-
-        # Snapshot button
-        snap_action = QAction("📷 Snapshot", self)
-        snap_action.triggered.connect(self.save_snapshot)
-        toolbar.addAction(snap_action)
+        view_menu.addAction(self.flip_action)
         
-        # Save spectrum button
-        save_spectrum_action = QAction("💾 Save Spectrum", self)
-        save_spectrum_action.triggered.connect(self.save_spectrum)
-        toolbar.addAction(save_spectrum_action)
-
-        # Toggle crop box
+        view_menu.addSeparator()
+        
+        self.fold_action = QAction("🔽 Hide Video Panel", self)
+        self.fold_action.setCheckable(True)
+        self.fold_action.setShortcut("Ctrl+H")
+        self.fold_action.triggered.connect(self.toggle_fold)
+        view_menu.addAction(self.fold_action)
+        
+        # Analysis Menu
+        analysis_menu = menubar.addMenu("&Analysis")
+        
         self.crop_action = QAction("✂ Crop Box", self)
         self.crop_action.setCheckable(True)
+        self.crop_action.setShortcut("Ctrl+R")
         self.crop_action.triggered.connect(self.toggle_crop_box)
-        toolbar.addAction(self.crop_action)
-
-        # Fold/unfold video button in toolbar
-        self.fold_action = QAction("🔽 Fold Video", self)
-        self.fold_action.setCheckable(True)
-        self.fold_action.triggered.connect(self.toggle_fold)
-        toolbar.addAction(self.fold_action)
+        analysis_menu.addAction(self.crop_action)
         
-        toolbar.addSeparator()
+        self.two_peaks_action = QAction("📊 Detect Two Peaks", self)
+        self.two_peaks_action.setCheckable(True)
+        self.two_peaks_action.setShortcut("Ctrl+2")
+        self.two_peaks_action.triggered.connect(self.toggle_two_peaks)
+        analysis_menu.addAction(self.two_peaks_action)
         
-        # Calibration mode button
-        self.calib_action = QAction("📐 Calibrate", self)
+        # Calibration Menu
+        calib_menu = menubar.addMenu("&Calibration")
+        
+        self.calib_action = QAction("📏 Calibration Mode", self)
         self.calib_action.setCheckable(True)
+        self.calib_action.setShortcut("Ctrl+M")
         self.calib_action.triggered.connect(self.toggle_calibration)
-        toolbar.addAction(self.calib_action)
+        calib_menu.addAction(self.calib_action)
         
-        # Clear calibration button
-        clear_calib_action = QAction("🗑️ Clear Calib", self)
-        clear_calib_action.triggered.connect(self.clear_calibration)
-        toolbar.addAction(clear_calib_action)
+        calib_menu.addSeparator()
         
-        # Save calibration button
-        save_calib_action = QAction("💾 Save Calib", self)
+        save_calib_action = QAction("💾 Save Calibration...", self)
+        save_calib_action.setShortcut("Ctrl+Shift+S")
         save_calib_action.triggered.connect(self.save_calibration)
-        toolbar.addAction(save_calib_action)
+        calib_menu.addAction(save_calib_action)
         
-        # Load calibration button
-        load_calib_action = QAction("📂 Load Calib", self)
+        load_calib_action = QAction("📂 Load Calibration...", self)
+        load_calib_action.setShortcut("Ctrl+Shift+L")
         load_calib_action.triggered.connect(self.load_calibration_dialog)
-        toolbar.addAction(load_calib_action)
+        calib_menu.addAction(load_calib_action)
+        
+        calib_menu.addSeparator()
+        
+        clear_calib_action = QAction("🗑️ Clear Calibration", self)
+        clear_calib_action.triggered.connect(self.clear_calibration)
+        calib_menu.addAction(clear_calib_action)
+        
+        # Help Menu
+        help_menu = menubar.addMenu("&Help")
+        
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+
+        # Toolbar - Keep minimal quick access buttons only
+        toolbar = QToolBar("Quick Access")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+        
+        # Add only most frequently used actions to toolbar
+        toolbar.addAction(self.pause_action)
+        toolbar.addAction(snap_action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.calib_action)
 
         # Layout using splitter so user can resize video vs graph
         splitter = QSplitter(Qt.Horizontal)
@@ -322,6 +390,10 @@ class MainWindow(QMainWindow):
         self.ax.set_title('Live Spectrum Analysis', fontsize=13)
         self.ax.grid(True, alpha=0.3)
         
+        # Set initial axes limits to ensure scale starts at (0,0) - no negatives
+        self.ax.set_xlim(400, 700)
+        self.ax.set_ylim(0, 100)
+        
         # Performance tuning: throttle plot updates to reduce redraw overhead
         self.plot_update_interval = 5  # update plot every N frames (set to 1 for every frame)
         self._frame_counter = 0
@@ -335,12 +407,16 @@ class MainWindow(QMainWindow):
         
         # Connect click event for calibration
         self.canvas.mpl_connect('button_press_event', self.on_plot_click)
+        self.canvas.mpl_connect('motion_notify_event', self.on_plot_hover)
         
         # Update title with calibration status
         self.update_calibration_display()
 
     def _find_next_snapshot_index(self):
-        files = glob.glob(os.path.join(os.getcwd(), "snappedshot*.png"))
+        snapshots_dir = os.path.join(os.getcwd(), "snapshots")
+        if not os.path.exists(snapshots_dir):
+            return 1
+        files = glob.glob(os.path.join(snapshots_dir, "snappedshot*.png"))
         nums = []
         for f in files:
             name = os.path.basename(f)
@@ -377,11 +453,114 @@ class MainWindow(QMainWindow):
     def _update_upper_v(self, value):
         self.upper_v = value
         self.upper_v_value_label.setText(str(value))
+    
+    def load_image(self):
+        """Load a static image file for analysis."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Spectrum Image",
+            os.getcwd(),
+            "Image Files (*.png *.jpg *.jpeg *.bmp *.tiff *.avif);;All Files (*)"
+        )
+        
+        if file_path:
+            image = cv2.imread(file_path)
+            if image is not None:
+                self.static_image = image
+                self.image_mode = True
+                
+                # Stop video capture if running
+                if self.cap is not None:
+                    try:
+                        self.cap.release()
+                    except:
+                        pass
+                    self.cap = None
+                
+                # Update window title
+                self.setWindowTitle(f"Spectrometer Analyzer - {os.path.basename(file_path)}")
+                print(f"Loaded image: {file_path}")
+            else:
+                QMessageBox.warning(self, "Error", f"Failed to load image: {file_path}")
+    
+    def show_about(self):
+        """Show about dialog."""
+        QMessageBox.about(self, "About Spectrometer Analyzer",
+            "<h3>Spectrometer Analyzer</h3>"
+            "<p>A professional tool for real-time spectrum analysis.</p>"
+            "<p><b>Features:</b></p>"
+            "<ul>"
+            "<li>Live video stream and static image analysis</li>"
+            "<li>Automatic peak detection</li>"
+            "<li>Wavelength calibration system</li>"
+            "<li>HSV color filtering with adjustable thresholds</li>"
+            "<li>Snapshot capture and export</li>"
+            "</ul>"
+            "<p><b>Keyboard Shortcuts:</b></p>"
+            "<ul>"
+            "<li>Space - Pause/Resume</li>"
+            "<li>Ctrl+O - Load Image</li>"
+            "<li>Ctrl+S - Save Snapshot</li>"
+            "<li>Ctrl+M - Calibration Mode</li>"
+            "<li>Ctrl+2 - Two Peaks Detection</li>"
+            "</ul>"
+        )
+    
+    def change_video_url(self):
+        """Change the video stream URL."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Enter Video Stream URL")
+        layout = QFormLayout(dialog)
+        
+        url_input = QLineEdit()
+        url_input.setText(self.default_video_url)  # Show default URL
+        url_input.setPlaceholderText("e.g., http://192.168.1.100:8080/video")
+        url_input.setMinimumWidth(400)
+        layout.addRow("Video URL:", url_input)
+        
+        info_label = QLabel("Enter the URL of the video stream.\nCommon formats: http://IP:PORT/video")
+        info_label.setWordWrap(True)
+        layout.addRow(info_label)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        
+        if dialog.exec() == QDialog.Accepted:
+            new_url = url_input.text().strip()
+            if new_url:
+                # Release old capture
+                if self.cap is not None:
+                    try:
+                        self.cap.release()
+                    except:
+                        pass
+                
+                # Open new video stream
+                self.cap = cv2.VideoCapture(new_url)
+                if self.cap.isOpened():
+                    self.video_url = new_url
+                    self.image_mode = False
+                    self.static_image = None
+                    self.setWindowTitle("Spectrometer Analyzer - Live Stream")
+                    print(f"Changed video URL to: {new_url}")
+                else:
+                    QMessageBox.warning(self, "Connection Error",
+                                       f"Failed to connect to video stream:\n{new_url}")
+                    # Try to reopen previous URL
+                    self.cap = cv2.VideoCapture(self.video_url)
+            else:
+                QMessageBox.warning(self, "Invalid Input", "Please enter a valid URL")
 
     def save_snapshot(self):
         if self.current_frame is None:
             return
-        fname = f"snappedshot{self.snapshot_index:02d}.png"
+        
+        # Create snapshots directory if it doesn't exist
+        snapshots_dir = os.path.join(os.getcwd(), "snapshots")
+        os.makedirs(snapshots_dir, exist_ok=True)
+        
+        fname = os.path.join(snapshots_dir, f"snappedshot{self.snapshot_index:02d}.png")
         cv2.imwrite(fname, self.current_frame)
         print(f"Saved snapshot: {fname}")
         self.snapshot_index += 1
@@ -425,6 +604,14 @@ class MainWindow(QMainWindow):
         self.video_label.show_rect = checked
         if not checked:
             self.video_label.clear_rect()
+    
+    def toggle_two_peaks(self, checked):
+        """Toggle between detecting one peak or two peaks."""
+        self.detect_two_peaks = checked
+        if checked:
+            self.two_peaks_action.setText("📊 Detect Two Peaks ✓")
+        else:
+            self.two_peaks_action.setText("📊 Detect Two Peaks")
 
     def toggle_fold(self, checked):
         # If checked -> hide video (fold), else show
@@ -434,10 +621,10 @@ class MainWindow(QMainWindow):
         if checked:
             # collapse right widget
             widget.setSizes([10000, 0])
-            self.fold_action.setText("🔼 Unfold Video")
+            self.fold_action.setText("🔼 Show Video Panel")
         else:
             widget.setSizes([900, 300])
-            self.fold_action.setText("🔽 Fold Video")
+            self.fold_action.setText("🔽 Hide Video Panel")
     
     def toggle_calibration(self, checked):
         """Enter/exit calibration mode."""
@@ -456,8 +643,62 @@ class MainWindow(QMainWindow):
             self.update_calibration_display()
     
     def on_plot_click(self, event):
-        """Handle clicks on the plot during calibration mode."""
-        if not self.calibration_mode or event.inaxes != self.ax:
+        """Handle clicks on the plot during calibration mode or on peak lines."""
+        if event.inaxes != self.ax:
+            return
+        
+        # Check if clicking on a peak line during calibration mode
+        if self.calibration_mode and self.hovered_peak_index is not None:
+            # Use the peak wavelength directly
+            peak_wavelength = self.peak_wavelengths[self.hovered_peak_index]
+            
+            # Find corresponding pixel index
+            if self.analyzer.wavelengths is not None:
+                pixel_idx = np.argmin(np.abs(self.analyzer.wavelengths - peak_wavelength))
+                
+                # Prompt user for actual wavelength with peak wavelength as default
+                dialog = QDialog(self)
+                dialog.setWindowTitle("Enter Wavelength")
+                layout = QFormLayout(dialog)
+                
+                wavelength_input = QLineEdit()
+                wavelength_input.setText(f"{peak_wavelength:.1f}")
+                wavelength_input.setPlaceholderText("e.g., 546.1 (mercury green)")
+                layout.addRow("Wavelength (nm):", wavelength_input)
+                
+                info_label = QLabel(f"Peak detected at: {peak_wavelength:.1f} nm\nPixel index: {pixel_idx}")
+                layout.addRow(info_label)
+                
+                buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+                buttons.accepted.connect(dialog.accept)
+                buttons.rejected.connect(dialog.reject)
+                layout.addRow(buttons)
+                
+                if dialog.exec() == QDialog.Accepted:
+                    try:
+                        wavelength = float(wavelength_input.text())
+                        if 200 <= wavelength <= 1100:
+                            self.calibration_points = [p for p in self.calibration_points 
+                                                       if abs(p[0] - pixel_idx) > 5]
+                            self.calibration_points.append([int(pixel_idx), float(wavelength)])
+                            self.calibration_points.sort(key=lambda p: p[0])
+                            
+                            if len(self.calibration_points) >= 2:
+                                self.analyzer.calibration = {'points': self.calibration_points}
+                                if self.analyzer.intensity_profile is not None:
+                                    self.analyzer.calibrate_wavelength()
+                            
+                            self.update_calibration_display()
+                            print(f"Added calibration point: pixel {pixel_idx} = {wavelength} nm")
+                        else:
+                            QMessageBox.warning(self, "Invalid Wavelength", 
+                                               "Wavelength must be between 200-1100 nm")
+                    except ValueError:
+                        QMessageBox.warning(self, "Invalid Input", "Please enter a valid number")
+            return
+        
+        # Original calibration click behavior
+        if not self.calibration_mode:
             return
         
         # Get pixel index from x-coordinate (wavelength displayed)
@@ -511,7 +752,47 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(self, "Invalid Wavelength", 
                                        "Wavelength must be between 200-1100 nm")
             except ValueError:
-                QMessageBox.warning(self, "Invalid Input", "Please enter a valid number")
+                        QMessageBox.warning(self, "Invalid Input", "Please enter a valid number")
+    
+    def on_plot_hover(self, event):
+        """Handle mouse hover over peak lines to highlight them."""
+        if event.inaxes != self.ax or not self.peak_wavelengths:
+            if self.hovered_peak_index is not None:
+                self.hovered_peak_index = None
+                self._update_peak_highlights()
+            return
+        
+        # Check if mouse is near any peak line (within 5nm tolerance)
+        mouse_x = event.xdata
+        if mouse_x is None:
+            if self.hovered_peak_index is not None:
+                self.hovered_peak_index = None
+                self._update_peak_highlights()
+            return
+        
+        closest_peak_index = None
+        min_distance = float('inf')
+        
+        for i, peak_wl in enumerate(self.peak_wavelengths):
+            distance = abs(mouse_x - peak_wl)
+            if distance < 5 and distance < min_distance:  # 5nm tolerance
+                min_distance = distance
+                closest_peak_index = i
+        
+        if closest_peak_index != self.hovered_peak_index:
+            self.hovered_peak_index = closest_peak_index
+            self._update_peak_highlights()
+    
+    def _update_peak_highlights(self):
+        """Update visual appearance of peak lines based on hover state."""
+        for i, line in enumerate(self.peak_lines):
+            if i == self.hovered_peak_index:
+                line.set_linewidth(3.0)
+                line.set_alpha(1.0)
+            else:
+                line.set_linewidth(2.0)
+                line.set_alpha(0.8)
+        self.canvas.draw_idle()
     
     def update_calibration_display(self):
         """Update the graph to show calibration markers."""
@@ -657,9 +938,19 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def next_frame(self):
-        ret, frame = self.cap.read()
-        if not ret:
-            return
+        # Handle static image mode
+        if self.image_mode and self.static_image is not None:
+            frame = self.static_image.copy()
+        else:
+            # Handle video stream mode
+            if self.cap is None or not self.cap.isOpened():
+                # Show welcome message if no source is loaded
+                if not hasattr(self, '_welcome_shown'):
+                    self._show_welcome_overlay()
+                return
+            ret, frame = self.cap.read()
+            if not ret:
+                return
 
         # More robust HSV filtering for full spectrum including orange
         # Reuse HSV buffer to avoid allocation
@@ -715,8 +1006,42 @@ class MainWindow(QMainWindow):
             self._frame_counter += 1
             if (self._frame_counter % self.plot_update_interval) == 0:
                 self._update_plot(res['wavelengths'], res['intensities'])
+    
+    def _show_welcome_overlay(self):
+        """Show welcome message on video label."""
+        from PySide6.QtGui import QFont
+        from PySide6.QtCore import Qt as QtCore
+        
+        welcome_text = (
+            "Welcome to Spectrometer Analyzer\n\n"
+            "Get Started:\n"
+            "• File > Load Image to analyze a static image\n"
+            "• File > Open Video Stream to connect to a camera"
+        )
+        
+        # Create a simple text overlay
+        self.video_label.setText(welcome_text)
+        self.video_label.setAlignment(QtCore.AlignCenter)
+        font = QFont()
+        font.setPointSize(11)
+        self.video_label.setFont(font)
+        self.video_label.setStyleSheet(
+            "QLabel { "
+            "background-color: #2b2b2b; "
+            "color: #ffffff; "
+            "padding: 20px; "
+            "border: 2px solid #555555; "
+            "}"
+        )
+        self._welcome_shown = True
 
     def _display_frame(self, frame):
+        # Clear welcome message if shown
+        if hasattr(self, '_welcome_shown') and self._welcome_shown:
+            self.video_label.setText("")
+            self.video_label.setStyleSheet("QLabel { background-color: black; }")
+            self._welcome_shown = False
+        
         # Convert BGR to RGB
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
@@ -761,8 +1086,91 @@ class MainWindow(QMainWindow):
         poly = Polygon(verts, closed=True, transform=self.ax.transData)
         if self.gradient_image is not None:
             self.gradient_image.set_clip_path(poly)
+        
+        # Peak detection
+        self._detect_and_draw_peaks(x, y, ymax)
 
         self.canvas.draw_idle()
+    
+    def _detect_and_draw_peaks(self, wavelengths, intensities, ymax):
+        """Detect peaks and draw vertical lines with wavelength labels."""
+        # Remove old peak markers
+        for line in self.peak_lines:
+            try:
+                line.remove()
+            except:
+                pass
+        for text in self.peak_texts:
+            try:
+                text.remove()
+            except:
+                pass
+        self.peak_lines.clear()
+        self.peak_texts.clear()
+        self.peak_wavelengths.clear()
+        
+        # Find peaks in the intensity profile
+        # Use prominence to find significant peaks
+        peaks, properties = find_peaks(intensities, prominence=ymax*0.1, distance=10)
+        
+        if len(peaks) == 0:
+            return
+        
+        # Sort peaks by intensity (height) and take top 1 or 2
+        peak_intensities = intensities[peaks]
+        sorted_indices = np.argsort(peak_intensities)[::-1]  # Descending order
+        
+        num_peaks = 2 if self.detect_two_peaks else 1
+        top_peak_indices = sorted_indices[:min(num_peaks, len(peaks))]
+        
+        # Draw peak lines
+        for peak_idx in top_peak_indices:
+            peak_pos = peaks[peak_idx]
+            peak_wavelength = wavelengths[peak_pos]
+            peak_intensity = intensities[peak_pos]
+            
+            self.peak_wavelengths.append(peak_wavelength)
+            
+            # Get contrasted color for the peak line
+            line_color = self._get_contrasted_color(peak_wavelength)
+            
+            # Draw vertical dashed line
+            vline = self.ax.axvline(peak_wavelength, color=line_color, 
+                                   linestyle='--', linewidth=2.0, alpha=0.8, zorder=3)
+            self.peak_lines.append(vline)
+            
+            # Add text label with wavelength
+            text = self.ax.text(peak_wavelength, ymax * 0.95, 
+                              f'{peak_wavelength:.1f} nm',
+                              color=line_color, fontsize=10, ha='center', va='top',
+                              fontweight='bold',
+                              bbox=dict(boxstyle='round,pad=0.4', 
+                                      facecolor='white', edgecolor=line_color, 
+                                      alpha=0.9, linewidth=1.5),
+                              zorder=4)
+            self.peak_texts.append(text)
+    
+    def _get_contrasted_color(self, wavelength):
+        """Get a contrasted color for the peak line based on wavelength."""
+        # Get the background color at this wavelength
+        if wavelength < 440:
+            # Violet/blue background -> use yellow/orange line
+            return '#FFA500'  # Orange
+        elif wavelength < 490:
+            # Blue background -> use yellow line
+            return '#FFD700'  # Gold
+        elif wavelength < 510:
+            # Cyan background -> use red line
+            return '#FF0000'  # Red
+        elif wavelength < 580:
+            # Green background -> use magenta line
+            return '#FF00FF'  # Magenta
+        elif wavelength < 645:
+            # Yellow background -> use blue line
+            return '#0000FF'  # Blue
+        else:
+            # Red background -> use cyan line
+            return '#00FFFF'  # Cyan
     
     def _create_gradient(self, ymin, ymax):
         """Create gradient only when needed."""
@@ -817,9 +1225,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    url = "http://192.168.1.4:8080//video"
-    # url = "test_emission_spectrum.jpg"  # for testing with static image
-    w = MainWindow(url)
+    w = MainWindow()
     w.resize(1200, 700)
     w.show()
     sys.exit(app.exec())
@@ -827,3 +1233,14 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# App ShortCuts:
+# Ctrl+O: Load Image
+# Ctrl+Shift+O: Open Video Stream
+# Ctrl+S: Save Snapshot
+# Ctrl+Shift+S: Save Spectrum
+# Space: Pause/Resume
+# Ctrl+F: Flip Horizontal
+# Ctrl+M: Calibration Mode
+# Ctrl+2: Two Peaks Detection
+# Ctrl+Q: Exit
