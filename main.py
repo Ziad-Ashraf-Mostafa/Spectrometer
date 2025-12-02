@@ -169,6 +169,11 @@ class MainWindow(QMainWindow):
         snap_action = QAction("📷 Snapshot", self)
         snap_action.triggered.connect(self.save_snapshot)
         toolbar.addAction(snap_action)
+        
+        # Save spectrum button
+        save_spectrum_action = QAction("💾 Save Spectrum", self)
+        save_spectrum_action.triggered.connect(self.save_spectrum)
+        toolbar.addAction(save_spectrum_action)
 
         # Toggle crop box
         self.crop_action = QAction("✂ Crop Box", self)
@@ -380,6 +385,41 @@ class MainWindow(QMainWindow):
         cv2.imwrite(fname, self.current_frame)
         print(f"Saved snapshot: {fname}")
         self.snapshot_index += 1
+    
+    def save_spectrum(self):
+        """Save the current spectrum as PNG and CSV."""
+        if self.analyzer.wavelengths is None or self.analyzer.intensity_profile is None:
+            QMessageBox.warning(self, "No Data", "No spectrum data available to save.")
+            return
+        
+        # Create directories if they don't exist
+        spectra_dir = os.path.join(os.getcwd(), "Saved Spectra")
+        csv_dir = os.path.join(os.getcwd(), "Saved CSVs")
+        os.makedirs(spectra_dir, exist_ok=True)
+        os.makedirs(csv_dir, exist_ok=True)
+        
+        # Find next available index
+        existing_files = glob.glob(os.path.join(spectra_dir, "spectrum*.png"))
+        nums = []
+        for f in existing_files:
+            name = os.path.basename(f)
+            m = re.search(r"spectrum(\d+)\.png", name)
+            if m:
+                nums.append(int(m.group(1)))
+        index = max(nums) + 1 if nums else 1
+        
+        # Save PNG
+        png_path = os.path.join(spectra_dir, f"spectrum{index:02d}.png")
+        self.canvas.figure.savefig(png_path, dpi=150, bbox_inches='tight')
+        
+        # Save CSV
+        csv_path = os.path.join(csv_dir, f"spectrum{index:02d}.csv")
+        data = np.column_stack([self.analyzer.wavelengths, self.analyzer.intensity_profile])
+        np.savetxt(csv_path, data, delimiter=',', header='Wavelength (nm),Intensity', comments='')
+        
+        QMessageBox.information(self, "Spectrum Saved", 
+                               f"Spectrum saved:\n{png_path}\n{csv_path}")
+        print(f"Saved spectrum {index:02d} to PNG and CSV")
 
     def toggle_crop_box(self, checked):
         self.video_label.show_rect = checked
@@ -777,7 +817,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    url = "http://192.168.137.41:8080//video"
+    url = "http://192.168.1.4:8080//video"
     # url = "test_emission_spectrum.jpg"  # for testing with static image
     w = MainWindow(url)
     w.resize(1200, 700)
