@@ -34,6 +34,7 @@ class VideoLabel(QLabel):
         self.drawing = False
         self.show_rect = False
         self.rect = None  # QRectF in widget coordinates
+        self.roi_changed = None  # Callback function when ROI changes
 
     def mousePressEvent(self, event):
         if self.show_rect and event.button() == Qt.LeftButton:
@@ -53,6 +54,9 @@ class VideoLabel(QLabel):
             self.drawing = False
             self._update_rect()
             self.update()
+            # Trigger callback when ROI is changed
+            if self.roi_changed is not None:
+                self.roi_changed()
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -126,6 +130,11 @@ class MainWindow(QMainWindow):
         
         # Flip state
         self.flip_enabled = True  # Default to flipped (current behavior)
+        
+        # Image mode state
+        self.image_mode = False  # False = video mode, True = image mode
+        self.loaded_image = None  # Store loaded image
+        self.loaded_image_path = None
         
         # HSV filter thresholds (S and V channels, H is fixed per range)
         self.lower_s = 40
@@ -384,6 +393,9 @@ class MainWindow(QMainWindow):
 
         # init plot line and gradient
         self.line, = self.ax.plot([], [], color='black', linewidth=1.5)
+        self.frozen_line = None  # Line object for frozen spectrum
+        self.frozen_wavelengths = None  # Frozen spectrum data
+        self.frozen_intensities = None
         self.gradient_image = None
         self.ax.set_xlabel('Wavelength (nm)', fontsize=11)
         self.ax.set_ylabel('Intensity (a.u.)', fontsize=11)
@@ -438,17 +450,117 @@ class MainWindow(QMainWindow):
         """Toggle horizontal flip of video frames."""
         self.flip_enabled = checked
     
+    def upload_image(self):
+        """Browse for an image file and load it."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Upload Image",
+            os.getcwd(),
+            "Image Files (*.png *.jpg *.jpeg *.bmp *.tiff *.avif);;All Files (*)"
+        )
+        
+        if file_path:
+            # Load the image
+            img = cv2.imread(file_path)
+            if img is None:
+                QMessageBox.warning(self, "Error", "Failed to load image file.")
+                return
+            
+            self.loaded_image = img
+            self.loaded_image_path = file_path
+            self.switch_mode_action.setEnabled(True)
+            
+            # Automatically switch to image mode
+            self.image_mode = True
+            self.switch_mode_action.setText("🔀 Switch to Video")
+            
+            # Process and display the image
+            self.process_current_source()
+            
+            print(f"Loaded image: {file_path}")
+            QMessageBox.information(self, "Image Loaded", 
+                                   f"Image loaded successfully:\n{os.path.basename(file_path)}\n\nNow in Image Mode.")
+    
+    def switch_mode(self):
+        """Switch between video and image mode."""
+        if self.loaded_image is None:
+            QMessageBox.warning(self, "No Image", "Please upload an image first.")
+            return
+        
+        self.image_mode = not self.image_mode
+        
+        if self.image_mode:
+            self.switch_mode_action.setText("🔀 Switch to Video")
+            print("Switched to Image Mode")
+        else:
+            self.switch_mode_action.setText("🔀 Switch to Image")
+            print("Switched to Video Mode")
+        
+        # Process the current source
+        self.process_current_source()
+    
+    def process_current_source(self):
+        """Process either video frame or loaded image based on current mode."""
+        if self.image_mode and self.loaded_image is not None:
+            # Process loaded image
+            frame = self.loaded_image.copy()
+            
+            # Apply HSV filtering
+            if self.hsv_buffer is None or self.hsv_buffer.shape != frame.shape:
+                self.hsv_buffer = np.empty_like(frame)
+            
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV, dst=self.hsv_buffer)
+            
+            # Create masks
+            mask1 = cv2.inRange(hsv, np.array([0, self.lower_s, self.lower_v]), np.array([25, self.upper_s, self.upper_v]))
+            mask2 = cv2.inRange(hsv, np.array([25, self.lower_s, self.lower_v]), np.array([85, self.upper_s, self.upper_v]))
+            mask3 = cv2.inRange(hsv, np.array([85, self.lower_s, self.lower_v]), np.array([160, self.upper_s, self.upper_v]))
+            mask4 = cv2.inRange(hsv, np.array([160, self.lower_s, self.lower_v]), np.array([180, self.upper_s, self.upper_v]))
+            
+            mask = mask1 | mask2 | mask3 | mask4
+            
+            kernel = np.ones((3, 3), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+            
+            spectrum_only = cv2.bitwise_and(frame, frame, mask=mask)
+            
+            # Flip if enabled
+            if self.flip_enabled:
+                processed = cv2.flip(spectrum_only, 1)
+            else:
+                processed = spectrum_only
+            
+            self.current_frame = processed.copy()
+            self._display_frame(processed)
+            
+            # Get ROI if crop box is enabled
+            roi = None
+            if self.video_label.show_rect and self.video_label.rect is not None:
+                roi = self.video_label.get_roi_on_frame(frame.shape)
+            
+            # Analyze spectrum
+            res = self.analyzer.process_and_update(processed, roi=roi, auto_detect=(roi is None),
+                                                   intensity_method='average', channel='gray',
+                                                   update_plot=False)
+            self._update_plot(res['wavelengths'], res['intensities'])
+    
     def _update_lower_s(self, value):
         self.lower_s = value
         self.lower_s_value_label.setText(str(value))
+        if self.image_mode:
+            self.process_current_source()
     
     def _update_lower_v(self, value):
         self.lower_v = value
         self.lower_v_value_label.setText(str(value))
+        if self.image_mode:
+            self.process_current_source()
     
     def _update_upper_s(self, value):
         self.upper_s = value
         self.upper_s_value_label.setText(str(value))
+        if self.image_mode:
+            self.process_current_source()
     
     def _update_upper_v(self, value):
         self.upper_v = value
@@ -599,7 +711,42 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Spectrum Saved", 
                                f"Spectrum saved:\n{png_path}\n{csv_path}")
         print(f"Saved spectrum {index:02d} to PNG and CSV")
+    
+    def freeze_spectrum(self):
+        """Freeze the current spectrum to display as background trace."""
+        if self.analyzer.wavelengths is None or self.analyzer.intensity_profile is None:
+            QMessageBox.warning(self, "No Data", "No spectrum data available to freeze.")
+            return
+        
+        # Store frozen spectrum data
+        self.frozen_wavelengths = self.analyzer.wavelengths.copy()
+        self.frozen_intensities = self.analyzer.intensity_profile.copy()
+        
+        # Create or update frozen line
+        if self.frozen_line is None:
+            self.frozen_line, = self.ax.plot([], [], color='gray', linewidth=1.5, 
+                                            alpha=0.5, linestyle='--', label='Frozen')
+            self.frozen_line.set_zorder(1.5)  # Between gradient and live line
+        
+        self.frozen_line.set_data(self.frozen_wavelengths, np.clip(self.frozen_intensities, 0.0, None))
+        self.canvas.draw_idle()
+        print("Spectrum frozen as background trace")
+    
+    def clear_frozen_spectrum(self):
+        """Clear the frozen spectrum trace."""
+        if self.frozen_line is not None:
+            self.frozen_line.set_data([], [])
+            self.canvas.draw_idle()
+        
+        self.frozen_wavelengths = None
+        self.frozen_intensities = None
+        print("Frozen spectrum cleared")
 
+    def on_roi_changed(self):
+        """Called when the crop box ROI is changed by the user."""
+        if self.image_mode:
+            self.process_current_source()
+    
     def toggle_crop_box(self, checked):
         self.video_label.show_rect = checked
         if not checked:
