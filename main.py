@@ -196,6 +196,16 @@ class MainWindow(QMainWindow):
         save_spectrum_action.triggered.connect(self.save_spectrum)
         file_menu.addAction(save_spectrum_action)
         
+        freeze_spectrum_action = QAction("❄️ Freeze Spectrum", self)
+        freeze_spectrum_action.setShortcut("Ctrl+E")
+        freeze_spectrum_action.triggered.connect(self.freeze_spectrum)
+        file_menu.addAction(freeze_spectrum_action)
+        
+        clear_frozen_action = QAction("🗑️ Clear Frozen", self)
+        clear_frozen_action.setShortcut("Ctrl+Shift+E")
+        clear_frozen_action.triggered.connect(self.clear_frozen_spectrum)
+        file_menu.addAction(clear_frozen_action)
+        
         file_menu.addSeparator()
         
         exit_action = QAction("E&xit", self)
@@ -611,9 +621,17 @@ class MainWindow(QMainWindow):
             "<ul>"
             "<li>Space - Pause/Resume</li>"
             "<li>Ctrl+O - Load Image</li>"
+            "<li>Ctrl+Shift+O - Open Video Stream</li>"
             "<li>Ctrl+S - Save Snapshot</li>"
+            "<li>Ctrl+Shift+S - Save Spectrum</li>"
+            "<li>Ctrl+E - Freeze Spectrum</li>"
+            "<li>Ctrl+Shift+E - Clear Frozen</li>"
+            "<li>Ctrl+F - Flip Horizontal</li>"
+            "<li>Ctrl+H - Hide/Show Video Panel</li>"
+            "<li>Ctrl+R - Crop Box</li>"
             "<li>Ctrl+M - Calibration Mode</li>"
             "<li>Ctrl+2 - Two Peaks Detection</li>"
+            "<li>Ctrl+Q - Exit</li>"
             "</ul>"
         )
     
@@ -1007,7 +1025,7 @@ class MainWindow(QMainWindow):
                                "Need at least 2 calibration points to save.")
             return
         
-        calib_file = os.path.join(os.getcwd(), "spectrometer_calibration.json")
+        calib_file = os.path.join(os.getcwd(), "callibrations/spectrometer_calibration.json")
         # Convert numpy types to standard Python types for JSON serialization
         calibration_data = [[int(p[0]), float(p[1])] for p in self.calibration_points]
         data = {
@@ -1234,6 +1252,10 @@ class MainWindow(QMainWindow):
         if self.gradient_image is not None:
             self.gradient_image.set_clip_path(poly)
         
+        # Update frozen spectrum if it exists (ensure it stays visible with current y-limits)
+        if self.frozen_line is not None and self.frozen_wavelengths is not None:
+            self.frozen_line.set_data(self.frozen_wavelengths, np.clip(self.frozen_intensities, 0.0, None))
+        
         # Peak detection
         self._detect_and_draw_peaks(x, y, ymax)
 
@@ -1386,8 +1408,12 @@ if __name__ == '__main__':
 # Ctrl+Shift+O: Open Video Stream
 # Ctrl+S: Save Snapshot
 # Ctrl+Shift+S: Save Spectrum
+# Ctrl+E: Freeze Spectrum
+# Ctrl+Shift+E: Clear Frozen Spectrum
 # Space: Pause/Resume
 # Ctrl+F: Flip Horizontal
+# Ctrl+H: Hide/Show Video Panel
+# Ctrl+R: Crop Box
 # Ctrl+M: Calibration Mode
 # Ctrl+2: Two Peaks Detection
 # Ctrl+Q: Exit

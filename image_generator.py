@@ -269,38 +269,84 @@ if __name__ == "__main__":
     print("SPECTRUM TEST IMAGE GENERATOR")
     print("=" * 70)
     
-    # Generate continuous spectrum (like from a prism or diffraction grating)
-    print("\n1. Generating continuous spectrum...")
-    metadata_continuous = create_test_spectrum(
-        spectrum_type='continuous',
-        output_path='test_continuous_spectrum.jpg',
-        show_preview=True
-    )
+    # Generate continuous spectrum with ONLY green and red bands visible
+    print("\n1. Generating CONTINUOUS spectrum with GREEN and RED bands only...")
     
-    # Generate emission line spectrum (like from a gas discharge tube)
-    print("\n2. Generating emission line spectrum...")
-    metadata_emission = create_test_spectrum(
-        spectrum_type='emission',
-        output_path='test_emission_spectrum.jpg',
-        show_preview=True
-    )
+    width = 1200
+    height = 80
+    start_wl = 400
+    end_wl = 700
+    
+    # Create base black image
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+    
+    # Define green and red continuous ranges
+    green_range = (510, 580)  # Green band
+    red_range = (620, 700)    # Red band
+    
+    # Fill in the spectrum
+    for x in range(width):
+        wavelength = start_wl + (end_wl - start_wl) * x / width
+        
+        # Check if wavelength is in green or red range
+        if green_range[0] <= wavelength <= green_range[1]:
+            # Green band - continuous gradient
+            r, g, b = wavelength_to_rgb(wavelength)
+            image[:, x] = [b, g, r]  # OpenCV uses BGR
+        elif red_range[0] <= wavelength <= red_range[1]:
+            # Red band - continuous gradient
+            r, g, b = wavelength_to_rgb(wavelength)
+            image[:, x] = [b, g, r]  # OpenCV uses BGR
+        else:
+            # Black for all other wavelengths (violet, blue, cyan, orange)
+            image[:, x] = [0, 0, 0]
+    
+    # Add slight noise for realism
+    spectrum_combined = generate_spectrum_with_noise(image, noise_level=0.03)
+    full_image_combined = add_background_and_borders(spectrum_combined, total_height=300)
+    cv2.imwrite('test_green_red_continuous.jpg', full_image_combined)
+    
+    print(f"✓ Green+Red continuous spectrum saved to: test_green_red_continuous.jpg")
+    print(f"  Full wavelength range: 400-700 nm")
+    print(f"  Visible continuous bands:")
+    print(f"    - GREEN band: 510-580 nm (continuous gradient)")
+    print(f"    - RED band: 620-700 nm (continuous gradient)")
+    print(f"  Dark/Black regions: 400-510 nm, 580-620 nm (violet, blue, cyan, orange)")
+    print(f"  Calibration points suggestion:")
+    print(f"    - Left edge (pixel ~0): 400 nm (black region)")
+    print(f"    - Green start: 510 nm")
+    print(f"    - Green middle: 545 nm")
+    print(f"    - Green end: 580 nm")
+    print(f"    - Red start: 620 nm")
+    print(f"    - Red middle: 660 nm")
+    print(f"    - Right edge (pixel ~1200): 700 nm")
     
     print("\n" + "=" * 70)
-    print("VERIFICATION INSTRUCTIONS")
+    print("CALIBRATION INSTRUCTIONS")
     print("=" * 70)
-    print("\nTo verify the spectrum analyzer:")
-    print("\n1. Use the generated test images with the analyzer:")
-    print("   - test_continuous_spectrum.jpg (should show smooth rainbow)")
-    print("   - test_emission_spectrum.jpg (should show discrete peaks)")
-    print("\n2. Expected results for continuous spectrum:")
-    print("   - Wavelength range: 400-700 nm")
-    print("   - Intensity should be relatively uniform across spectrum")
-    print("   - Colors: violet -> blue -> cyan -> green -> yellow -> red")
-    print("\n3. Expected results for emission spectrum:")
-    print("   - Should show distinct peaks at:")
-    for wl, intensity in metadata_emission['emission_lines']:
-        print(f"     {wl} nm (relative intensity: {intensity:.1f})")
-    print("\n4. Run the analyzer and check if:")
-    print("   - Auto-detection finds the spectrum stripe")
-    print("   - Wavelength calibration matches 400-700 nm range")
-    print("   - Peak positions match expected wavelengths (for emission)")
+    print("\nFor GREEN+RED continuous spectrum (test_green_red_continuous.jpg):")
+    print("  1. Load the image in the analyzer")
+    print("  2. Enter calibration mode (Ctrl+M)")
+    print("  3. Click at the LEFT edge (black region) and enter: 400")
+    print("  4. Click at the start of green band and enter: 510")
+    print("  5. Click at the middle of green band and enter: 545")
+    print("  6. Click at the start of red band and enter: 620")
+    print("  7. Click at the RIGHT edge and enter: 700")
+    print("  8. Expected: Continuous green band (510-580nm) and red band (620-700nm)")
+    print("              Black in violet, blue, cyan, and orange regions")
+    
+    print("\n" + "=" * 70)
+    print("SPECTRUM CHARACTERISTICS")
+    print("=" * 70)
+    print("\nGreen+Red continuous spectrum (400-700 nm full range):")
+    print("  - Full visible spectrum range (400-700 nm)")
+    print("  - GREEN continuous band: 510-580 nm")
+    print("    (cyan-green → pure green → yellow-green → yellow)")
+    print("  - RED continuous band: 620-700 nm")
+    print("    (orange-red → red → deep red → far red)")
+    print("  - BLACK regions: 400-510 nm (violet, blue)")
+    print("                  580-620 nm (yellow-orange gap)")
+    print("  - Simulates filtered continuous spectrum or bandpass filters")
+    
+    print("\n✓ Continuous green+red spectrum image generated successfully!")
+    print("=" * 70)
