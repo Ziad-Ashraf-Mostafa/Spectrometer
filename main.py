@@ -174,6 +174,16 @@ class MainWindow(QMainWindow):
         save_spectrum_action = QAction("💾 Save Spectrum", self)
         save_spectrum_action.triggered.connect(self.save_spectrum)
         toolbar.addAction(save_spectrum_action)
+        
+        # Freeze spectrum button
+        freeze_spectrum_action = QAction("❄️ Freeze", self)
+        freeze_spectrum_action.triggered.connect(self.freeze_spectrum)
+        toolbar.addAction(freeze_spectrum_action)
+        
+        # Clear frozen spectrum button
+        clear_frozen_action = QAction("🗑️ Clear Frozen", self)
+        clear_frozen_action.triggered.connect(self.clear_frozen_spectrum)
+        toolbar.addAction(clear_frozen_action)
 
         # Toggle crop box
         self.crop_action = QAction("✂ Crop Box", self)
@@ -316,6 +326,9 @@ class MainWindow(QMainWindow):
 
         # init plot line and gradient
         self.line, = self.ax.plot([], [], color='black', linewidth=1.5)
+        self.frozen_line = None  # Line object for frozen spectrum
+        self.frozen_wavelengths = None  # Frozen spectrum data
+        self.frozen_intensities = None
         self.gradient_image = None
         self.ax.set_xlabel('Wavelength (nm)', fontsize=11)
         self.ax.set_ylabel('Intensity (a.u.)', fontsize=11)
@@ -420,6 +433,36 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Spectrum Saved", 
                                f"Spectrum saved:\n{png_path}\n{csv_path}")
         print(f"Saved spectrum {index:02d} to PNG and CSV")
+    
+    def freeze_spectrum(self):
+        """Freeze the current spectrum to display as background trace."""
+        if self.analyzer.wavelengths is None or self.analyzer.intensity_profile is None:
+            QMessageBox.warning(self, "No Data", "No spectrum data available to freeze.")
+            return
+        
+        # Store frozen spectrum data
+        self.frozen_wavelengths = self.analyzer.wavelengths.copy()
+        self.frozen_intensities = self.analyzer.intensity_profile.copy()
+        
+        # Create or update frozen line
+        if self.frozen_line is None:
+            self.frozen_line, = self.ax.plot([], [], color='gray', linewidth=1.5, 
+                                            alpha=0.5, linestyle='--', label='Frozen')
+            self.frozen_line.set_zorder(1.5)  # Between gradient and live line
+        
+        self.frozen_line.set_data(self.frozen_wavelengths, np.clip(self.frozen_intensities, 0.0, None))
+        self.canvas.draw_idle()
+        print("Spectrum frozen as background trace")
+    
+    def clear_frozen_spectrum(self):
+        """Clear the frozen spectrum trace."""
+        if self.frozen_line is not None:
+            self.frozen_line.set_data([], [])
+            self.canvas.draw_idle()
+        
+        self.frozen_wavelengths = None
+        self.frozen_intensities = None
+        print("Frozen spectrum cleared")
 
     def toggle_crop_box(self, checked):
         self.video_label.show_rect = checked
@@ -761,6 +804,10 @@ class MainWindow(QMainWindow):
         poly = Polygon(verts, closed=True, transform=self.ax.transData)
         if self.gradient_image is not None:
             self.gradient_image.set_clip_path(poly)
+        
+        # Update frozen spectrum if it exists (ensure it stays visible with current y-limits)
+        if self.frozen_line is not None and self.frozen_wavelengths is not None:
+            self.frozen_line.set_data(self.frozen_wavelengths, np.clip(self.frozen_intensities, 0.0, None))
 
         self.canvas.draw_idle()
     
