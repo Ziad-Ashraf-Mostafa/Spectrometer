@@ -12,7 +12,7 @@ from pathlib import Path
 class SpectrumAnalyzer:
     """Analyzes spectrum images and extracts wavelength-intensity data."""
     
-    def __init__(self, image_path=None, wavelength_calibration=None):
+    def __init__(self, image_path=None, wavelength_calibration=None, verbose=False):
         """
         Initialize the spectrum analyzer.
 
@@ -30,6 +30,12 @@ class SpectrumAnalyzer:
         self.calibration = wavelength_calibration or {
             'linear': [400, 700]  # Default visible spectrum range
         }
+        # Verbose flag controls printing for performance-sensitive usage
+        self.verbose = bool(verbose)
+        
+        # Pre-allocate buffers for faster processing
+        self._gray_buffer = None
+        self._data_buffer = None
         # Realtime plotting attributes
         self.fig = None
         self.ax = None
@@ -41,7 +47,8 @@ class SpectrumAnalyzer:
         self.image = cv2.imread(str(self.image_path))
         if self.image is None:
             raise FileNotFoundError(f"Could not load image: {self.image_path}")
-        print(f"Image loaded: {self.image.shape[1]}x{self.image.shape[0]} pixels")
+        if self.verbose:
+            print(f"Image loaded: {self.image.shape[1]}x{self.image.shape[0]} pixels")
         return self.image
     
     def crop_spectrum(self, roi=None, auto_detect=True):
@@ -81,7 +88,8 @@ class SpectrumAnalyzer:
             y_end = min(self.image.shape[0], y_start + region_height)
             
             self.spectrum_region = self.image[y_start:y_end, :]
-            print(f"Auto-detected spectrum region: rows {y_start}-{y_end}")
+            if self.verbose:
+                print(f"Auto-detected spectrum region: rows {y_start}-{y_end}")
         else:
             # Use the full image
             self.spectrum_region = self.image.copy()
@@ -114,7 +122,8 @@ class SpectrumAnalyzer:
         self.spectrum_region = cv2.warpPerspective(
             self.spectrum_region, matrix, (width, height)
         )
-        print("Perspective correction applied")
+        if self.verbose:
+            print("Perspective correction applied")
         return self.spectrum_region
     
     def extract_intensity(self, method='average', channel='gray'):
@@ -131,9 +140,11 @@ class SpectrumAnalyzer:
         if self.spectrum_region is None:
             raise ValueError("Spectrum region not set. Run crop_spectrum() first.")
         
-        # Select color channel
+        # Select color channel with buffer reuse
         if channel == 'gray':
-            data = cv2.cvtColor(self.spectrum_region, cv2.COLOR_BGR2GRAY)
+            if self._gray_buffer is None or self._gray_buffer.shape != self.spectrum_region.shape[:2]:
+                self._gray_buffer = np.empty(self.spectrum_region.shape[:2], dtype=np.uint8)
+            data = cv2.cvtColor(self.spectrum_region, cv2.COLOR_BGR2GRAY, dst=self._gray_buffer)
         elif channel == 'red':
             data = self.spectrum_region[:, :, 2]  # BGR format
         elif channel == 'green':
@@ -146,9 +157,9 @@ class SpectrumAnalyzer:
         else:
             raise ValueError(f"Unknown channel: {channel}")
         
-        # Collapse along vertical axis using specified method
+        # Fast collapse using numpy operations
         if method == 'average':
-            self.intensity_profile = np.mean(data, axis=0)
+            self.intensity_profile = np.mean(data, axis=0, dtype=np.float32)
         elif method == 'max':
             self.intensity_profile = np.max(data, axis=0)
         elif method == 'median':
@@ -156,7 +167,8 @@ class SpectrumAnalyzer:
         else:
             raise ValueError(f"Unknown method: {method}")
         
-        print(f"Intensity profile extracted: {len(self.intensity_profile)} points")
+        if self.verbose:
+            print(f"Intensity profile extracted: {len(self.intensity_profile)} points")
         return self.intensity_profile
     
     def calibrate_wavelength(self):
@@ -171,49 +183,41 @@ class SpectrumAnalyzer:
         
         num_pixels = len(self.intensity_profile)
         
+        # Reuse wavelength array if size matches
+        if self.wavelengths is None or len(self.wavelengths) != num_pixels:
+            self.wavelengths = np.empty(num_pixels, dtype=np.float32)
+        
         if 'linear' in self.calibration:
             # Linear calibration: map first pixel to start_nm, last to end_nm
             start_nm, end_nm = self.calibration['linear']
-            self.wavelengths = np.linspace(start_nm, end_nm, num_pixels)
-            print(f"Linear calibration: {start_nm}-{end_nm} nm")
+            self.wavelengths[:] = np.linspace(start_nm, end_nm, num_pixels)
+            if self.verbose:
+                print(f"Linear calibration: {start_nm}-{end_nm} nm")
         
         elif 'points' in self.calibration:
             # Calibration using known reference points
             points = np.array(self.calibration['points'])  # [[pixel, wavelength], ...]
             pixels = points[:, 0]
-            wavelengths = points[:, 1]
+            wavelengths_cal = points[:, 1]
             
-            # Interpolate and EXTRAPOLATE wavelength for all pixel positions
+            # Interpolate wavelength for all pixel positions
             pixel_positions = np.arange(num_pixels)
+            self.wavelengths[:] = np.interp(pixel_positions, pixels, wavelengths_cal)
             
-            # Use linear extrapolation beyond the calibration points
-            # This ensures the full spectrum is shown, not just the calibrated region
-            self.wavelengths = np.interp(pixel_positions, pixels, wavelengths, 
-                                        left=None, right=None)
+            # Extrapolation (vectorized)
+            if pixel_positions[0] < pixels[0] and len(pixels) >= 2:
+                slope = (wavelengths_cal[1] - wavelengths_cal[0]) / (pixels[1] - pixels[0])
+                mask = pixel_positions < pixels[0]
+                self.wavelengths[mask] = wavelengths_cal[0] + slope * (pixel_positions[mask] - pixels[0])
             
-            # For pixels outside calibration range, extrapolate linearly
-            if pixel_positions[0] < pixels[0]:
-                # Extrapolate to the left using first two calibration points
-                if len(pixels) >= 2:
-                    slope = (wavelengths[1] - wavelengths[0]) / (pixels[1] - pixels[0])
-                    for i in range(num_pixels):
-                        if pixel_positions[i] < pixels[0]:
-                            self.wavelengths[i] = wavelengths[0] + slope * (pixel_positions[i] - pixels[0])
-                        else:
-                            break
+            if pixel_positions[-1] > pixels[-1] and len(pixels) >= 2:
+                slope = (wavelengths_cal[-1] - wavelengths_cal[-2]) / (pixels[-1] - pixels[-2])
+                mask = pixel_positions > pixels[-1]
+                self.wavelengths[mask] = wavelengths_cal[-1] + slope * (pixel_positions[mask] - pixels[-1])
             
-            if pixel_positions[-1] > pixels[-1]:
-                # Extrapolate to the right using last two calibration points
-                if len(pixels) >= 2:
-                    slope = (wavelengths[-1] - wavelengths[-2]) / (pixels[-1] - pixels[-2])
-                    for i in range(num_pixels - 1, -1, -1):
-                        if pixel_positions[i] > pixels[-1]:
-                            self.wavelengths[i] = wavelengths[-1] + slope * (pixel_positions[i] - pixels[-1])
-                        else:
-                            break
-            
-            print(f"Point calibration: {len(points)} reference points")
-            print(f"  Wavelength range: {self.wavelengths[0]:.1f} - {self.wavelengths[-1]:.1f} nm")
+            if self.verbose:
+                print(f"Point calibration: {len(points)} reference points")
+                print(f"  Wavelength range: {self.wavelengths[0]:.1f} - {self.wavelengths[-1]:.1f} nm")
         
         else:
             raise ValueError("Invalid calibration configuration")
@@ -256,7 +260,8 @@ class SpectrumAnalyzer:
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"Plot saved to: {save_path}")
+            if self.verbose:
+                print(f"Plot saved to: {save_path}")
         
         plt.show()
 
@@ -345,7 +350,8 @@ class SpectrumAnalyzer:
             comments='',
             fmt='%.3f'
         )
-        print(f"Data saved to: {csv_path}")
+        if self.verbose:
+            print(f"Data saved to: {csv_path}")
     
     def analyze(self, roi=None, auto_detect=True, intensity_method='average',
                 channel='gray', plot=True, save_plot=None, save_csv=None):

@@ -9,9 +9,9 @@ from SpectrumAnalyzer import SpectrumAnalyzer
 # PySide6 GUI imports
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, 
-    QVBoxLayout, QToolBar, QSplitter, QSizePolicy, QFrame,
+    QVBoxLayout, QHBoxLayout, QToolBar, QSplitter, QSizePolicy, QFrame,
     QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QMessageBox,
-    QFileDialog
+    QFileDialog, QSlider, QGroupBox
 )
 from PySide6.QtCore import Qt, QTimer, QRectF
 from PySide6.QtGui import QImage, QPixmap, QAction
@@ -120,12 +120,21 @@ class MainWindow(QMainWindow):
         self.calibration_markers = []  # matplotlib artists for calibration points
         self.load_calibration()  # Load saved calibration if exists
         
+        # Flip state
+        self.flip_enabled = True  # Default to flipped (current behavior)
+        
+        # HSV filter thresholds (S and V channels, H is fixed per range)
+        self.lower_s = 40
+        self.lower_v = 40
+        self.upper_s = 255
+        self.upper_v = 255
+        
         # Initialize analyzer with loaded or default calibration
         if len(self.calibration_points) >= 2:
             calib_config = {'points': self.calibration_points}
         else:
             calib_config = {'linear': [400, 700]}
-        self.analyzer = SpectrumAnalyzer(image_path=None, wavelength_calibration=calib_config)
+        self.analyzer = SpectrumAnalyzer(image_path=None, wavelength_calibration=calib_config, verbose=False)
 
         # Main widgets
         self.canvas = FigureCanvas(Figure(figsize=(8, 5)))
@@ -148,6 +157,13 @@ class MainWindow(QMainWindow):
         self.pause_action.setCheckable(True)
         self.pause_action.triggered.connect(self.toggle_pause)
         toolbar.addAction(self.pause_action)
+        
+        # Flip toggle button
+        self.flip_action = QAction("🔄 Flip", self)
+        self.flip_action.setCheckable(True)
+        self.flip_action.setChecked(True)  # Start with flip enabled
+        self.flip_action.triggered.connect(self.toggle_flip)
+        toolbar.addAction(self.flip_action)
 
         # Snapshot button
         snap_action = QAction("📷 Snapshot", self)
@@ -198,11 +214,82 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(4, 4, 4, 4)
         left_layout.addWidget(self.canvas)
 
-        # Right side: Video display
+        # Right side: Video display and threshold controls
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(4, 4, 4, 4)
         right_layout.addWidget(self.video_label)
+        
+        # HSV Threshold Controls
+        threshold_group = QGroupBox("HSV Filter Thresholds")
+        threshold_layout = QVBoxLayout()
+        
+        # Lower Saturation
+        lower_s_layout = QHBoxLayout()
+        lower_s_label = QLabel("Lower S:")
+        self.lower_s_slider = QSlider(Qt.Horizontal)
+        self.lower_s_slider.setRange(0, 255)
+        self.lower_s_slider.setValue(self.lower_s)
+        self.lower_s_slider.setTickPosition(QSlider.TicksBelow)
+        self.lower_s_slider.setTickInterval(25)
+        self.lower_s_value_label = QLabel(str(self.lower_s))
+        self.lower_s_value_label.setMinimumWidth(30)
+        self.lower_s_slider.valueChanged.connect(self._update_lower_s)
+        lower_s_layout.addWidget(lower_s_label)
+        lower_s_layout.addWidget(self.lower_s_slider)
+        lower_s_layout.addWidget(self.lower_s_value_label)
+        
+        # Lower Value
+        lower_v_layout = QHBoxLayout()
+        lower_v_label = QLabel("Lower V:")
+        self.lower_v_slider = QSlider(Qt.Horizontal)
+        self.lower_v_slider.setRange(0, 255)
+        self.lower_v_slider.setValue(self.lower_v)
+        self.lower_v_slider.setTickPosition(QSlider.TicksBelow)
+        self.lower_v_slider.setTickInterval(25)
+        self.lower_v_value_label = QLabel(str(self.lower_v))
+        self.lower_v_value_label.setMinimumWidth(30)
+        self.lower_v_slider.valueChanged.connect(self._update_lower_v)
+        lower_v_layout.addWidget(lower_v_label)
+        lower_v_layout.addWidget(self.lower_v_slider)
+        lower_v_layout.addWidget(self.lower_v_value_label)
+        
+        # Upper Saturation
+        upper_s_layout = QHBoxLayout()
+        upper_s_label = QLabel("Upper S:")
+        self.upper_s_slider = QSlider(Qt.Horizontal)
+        self.upper_s_slider.setRange(0, 255)
+        self.upper_s_slider.setValue(self.upper_s)
+        self.upper_s_slider.setTickPosition(QSlider.TicksBelow)
+        self.upper_s_slider.setTickInterval(25)
+        self.upper_s_value_label = QLabel(str(self.upper_s))
+        self.upper_s_value_label.setMinimumWidth(30)
+        self.upper_s_slider.valueChanged.connect(self._update_upper_s)
+        upper_s_layout.addWidget(upper_s_label)
+        upper_s_layout.addWidget(self.upper_s_slider)
+        upper_s_layout.addWidget(self.upper_s_value_label)
+        
+        # Upper Value
+        upper_v_layout = QHBoxLayout()
+        upper_v_label = QLabel("Upper V:")
+        self.upper_v_slider = QSlider(Qt.Horizontal)
+        self.upper_v_slider.setRange(0, 255)
+        self.upper_v_slider.setValue(self.upper_v)
+        self.upper_v_slider.setTickPosition(QSlider.TicksBelow)
+        self.upper_v_slider.setTickInterval(25)
+        self.upper_v_value_label = QLabel(str(self.upper_v))
+        self.upper_v_value_label.setMinimumWidth(30)
+        self.upper_v_slider.valueChanged.connect(self._update_upper_v)
+        upper_v_layout.addWidget(upper_v_label)
+        upper_v_layout.addWidget(self.upper_v_slider)
+        upper_v_layout.addWidget(self.upper_v_value_label)
+        
+        threshold_layout.addLayout(lower_s_layout)
+        threshold_layout.addLayout(lower_v_layout)
+        threshold_layout.addLayout(upper_s_layout)
+        threshold_layout.addLayout(upper_v_layout)
+        threshold_group.setLayout(threshold_layout)
+        right_layout.addWidget(threshold_group)
 
         splitter.addWidget(left_widget)
         splitter.addWidget(right_widget)
@@ -230,6 +317,17 @@ class MainWindow(QMainWindow):
         self.ax.set_title('Live Spectrum Analysis', fontsize=13)
         self.ax.grid(True, alpha=0.3)
         
+        # Performance tuning: throttle plot updates to reduce redraw overhead
+        self.plot_update_interval = 5  # update plot every N frames (set to 1 for every frame)
+        self._frame_counter = 0
+        
+        # Cache for gradient (avoid recreating every frame)
+        self._gradient_cache = None
+        self._cached_ylim = None
+        
+        # Pre-allocate buffers to avoid repeated allocation
+        self.hsv_buffer = None
+        
         # Connect click event for calibration
         self.canvas.mpl_connect('button_press_event', self.on_plot_click)
         
@@ -254,6 +352,26 @@ class MainWindow(QMainWindow):
         else:
             self.paused = False
             self.pause_action.setText("⏸ Pause")
+    
+    def toggle_flip(self, checked):
+        """Toggle horizontal flip of video frames."""
+        self.flip_enabled = checked
+    
+    def _update_lower_s(self, value):
+        self.lower_s = value
+        self.lower_s_value_label.setText(str(value))
+    
+    def _update_lower_v(self, value):
+        self.lower_v = value
+        self.lower_v_value_label.setText(str(value))
+    
+    def _update_upper_s(self, value):
+        self.upper_s = value
+        self.upper_s_value_label.setText(str(value))
+    
+    def _update_upper_v(self, value):
+        self.upper_v = value
+        self.upper_v_value_label.setText(str(value))
 
     def save_snapshot(self):
         if self.current_frame is None:
@@ -504,22 +622,25 @@ class MainWindow(QMainWindow):
             return
 
         # More robust HSV filtering for full spectrum including orange
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        # Reuse HSV buffer to avoid allocation
+        if self.hsv_buffer is None or self.hsv_buffer.shape != frame.shape:
+            self.hsv_buffer = np.empty_like(frame)
+        
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV, dst=self.hsv_buffer)
         
         # Create multiple masks for different hue ranges to catch all spectrum colors
+        # Use runtime-adjustable saturation and value thresholds
         # Red/Orange range (wraps around 180)
-        mask1 = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([25, 255, 255]))
+        mask1 = cv2.inRange(hsv, np.array([0, self.lower_s, self.lower_v]), np.array([25, self.upper_s, self.upper_v]))
         # Orange to Green
-        mask2 = cv2.inRange(hsv, np.array([25, 40, 40]), np.array([85, 255, 255]))
+        mask2 = cv2.inRange(hsv, np.array([25, self.lower_s, self.lower_v]), np.array([85, self.upper_s, self.upper_v]))
         # Cyan to Blue to Violet
-        mask3 = cv2.inRange(hsv, np.array([85, 40, 40]), np.array([160, 255, 255]))
+        mask3 = cv2.inRange(hsv, np.array([85, self.lower_s, self.lower_v]), np.array([160, self.upper_s, self.upper_v]))
         # Red wrap-around (upper red)
-        mask4 = cv2.inRange(hsv, np.array([160, 40, 40]), np.array([180, 255, 255]))
+        mask4 = cv2.inRange(hsv, np.array([160, self.lower_s, self.lower_v]), np.array([180, self.upper_s, self.upper_v]))
         
-        # Combine all masks
-        mask = cv2.bitwise_or(mask1, mask2)
-        mask = cv2.bitwise_or(mask, mask3)
-        mask = cv2.bitwise_or(mask, mask4)
+        # Combine masks efficiently using bitwise OR
+        mask = mask1 | mask2 | mask3 | mask4
         
         # Clean up noise with morphological operations
         kernel = np.ones((3, 3), np.uint8)
@@ -529,13 +650,15 @@ class MainWindow(QMainWindow):
         # Apply mask to keep only colored spectrum regions (set rest to black)
         spectrum_only = cv2.bitwise_and(frame, frame, mask=mask)
 
-        # flip horizontally as requested
-        # flipped = cv2.flip(spectrum_only, 1)
-        flipped = spectrum_only
-        self.current_frame = flipped.copy()
+        # Flip horizontally if enabled
+        if self.flip_enabled:
+            processed = cv2.flip(spectrum_only, 1)
+        else:
+            processed = spectrum_only
+        self.current_frame = processed.copy()
 
-        # Display flipped frame in the QLabel
-        self._display_frame(flipped)
+        # Display processed frame in the QLabel
+        self._display_frame(processed)
 
         # Prepare ROI if crop box enabled
         roi = None
@@ -544,10 +667,14 @@ class MainWindow(QMainWindow):
 
         # Update analyzer and plot if not paused
         if not self.paused:
-            res = self.analyzer.process_and_update(flipped, roi=roi, auto_detect=(roi is None),
+            res = self.analyzer.process_and_update(processed, roi=roi, auto_detect=(roi is None),
                                                    intensity_method='average', channel='gray',
                                                    update_plot=False)
-            self._update_plot(res['wavelengths'], res['intensities'])
+
+            # Throttle plot updates to improve performance
+            self._frame_counter += 1
+            if (self._frame_counter % self.plot_update_interval) == 0:
+                self._update_plot(res['wavelengths'], res['intensities'])
 
     def _display_frame(self, frame):
         # Convert BGR to RGB
@@ -562,95 +689,96 @@ class MainWindow(QMainWindow):
         if wavelengths is None or intensities is None:
             return
         x = wavelengths
-        y = intensities
+        # Ensure intensities are non-negative
+        y = np.clip(intensities, 0.0, None)
+
         self.line.set_data(x, y)
-        
+
         # Keep x-axis fixed at 400-700nm range
         self.ax.set_xlim(400, 700)
-        
-        # Auto-scale y-axis only
-        self.ax.relim()
-        self.ax.autoscale_view(scalex=False, scaley=True)
 
-        # create gradient image representing visible spectrum (violet to red)
-        # Always use fixed 400-700nm range for gradient
+        # Compute ymax
+        try:
+            ymax = float(np.nanmax(y))
+        except Exception:
+            ymax = 1.0
+        if not np.isfinite(ymax) or ymax <= 0:
+            ymax = 1.0
+        # add margin
+        ymax *= 1.05
+        
+        # Only recreate gradient if y-limits changed significantly
+        current_ylim = (0.0, ymax)
+        if self._cached_ylim is None or abs(self._cached_ylim[1] - ymax) > ymax * 0.1:
+            self._create_gradient(0.0, ymax)
+            self._cached_ylim = current_ylim
+        
+        self.ax.set_ylim(0.0, ymax)
+
+        # Update polygon clip path
+        verts = np.column_stack([x, y])
+        verts = np.vstack([[x[0], 0.0], verts, [x[-1], 0.0]])
+        poly = Polygon(verts, closed=True, transform=self.ax.transData)
+        if self.gradient_image is not None:
+            self.gradient_image.set_clip_path(poly)
+
+        self.canvas.draw_idle()
+    
+    def _create_gradient(self, ymin, ymax):
+        """Create gradient only when needed."""
         xmin, xmax = 400, 700
-        ymin, ymax = self.ax.get_ylim()
-
-        # Build wavelength-accurate color gradient
-        # Each wavelength gets its scientifically accurate color
-        N = 300  # Number of samples across 400-700nm
-        wavelength_samples = np.linspace(400, 700, N)
-        colors = np.zeros((1, N, 3), dtype=float)
         
-        # Map each wavelength to its actual visible color
-        for i, wl in enumerate(wavelength_samples):
-            if wl < 380:
-                colors[0, i, :] = [0, 0, 0]  # Below visible
-            elif wl < 440:  # Violet to Blue
-                colors[0, i, :] = [
-                    (440 - wl) / (440 - 380) * 0.58,  # Violet component
-                    0,
-                    1.0
-                ]
-            elif wl < 490:  # Blue to Cyan
-                colors[0, i, :] = [
-                    0,
-                    (wl - 440) / (490 - 440),
-                    1.0
-                ]
-            elif wl < 510:  # Cyan to Green
-                colors[0, i, :] = [
-                    0,
-                    1.0,
-                    (510 - wl) / (510 - 490)
-                ]
-            elif wl < 580:  # Green to Yellow
-                colors[0, i, :] = [
-                    (wl - 510) / (580 - 510),
-                    1.0,
-                    0
-                ]
-            elif wl < 645:  # Yellow to Red
-                colors[0, i, :] = [
-                    1.0,
-                    (645 - wl) / (645 - 580),
-                    0
-                ]
-            elif wl <= 700:  # Red
-                colors[0, i, :] = [1.0, 0, 0]
-            else:  # Beyond visible
-                colors[0, i, :] = [0, 0, 0]
-
-        # remove previous image
+        # Use cached gradient if available
+        if self._gradient_cache is None:
+            N = 300
+            wavelength_samples = np.linspace(400, 700, N)
+            colors = np.zeros((1, N, 3), dtype=float)
+            
+            # Map each wavelength to its actual visible color
+            for i, wl in enumerate(wavelength_samples):
+                if wl < 380:
+                    colors[0, i, :] = [0, 0, 0]
+                elif wl < 440:
+                    colors[0, i, :] = [(440 - wl) / (440 - 380) * 0.58, 0, 1.0]
+                elif wl < 490:
+                    colors[0, i, :] = [0, (wl - 440) / (490 - 440), 1.0]
+                elif wl < 510:
+                    colors[0, i, :] = [0, 1.0, (510 - wl) / (510 - 490)]
+                elif wl < 580:
+                    colors[0, i, :] = [(wl - 510) / (580 - 510), 1.0, 0]
+                elif wl < 645:
+                    colors[0, i, :] = [1.0, (645 - wl) / (645 - 580), 0]
+                elif wl <= 700:
+                    colors[0, i, :] = [1.0, 0, 0]
+                else:
+                    colors[0, i, :] = [0, 0, 0]
+            
+            self._gradient_cache = colors
+        
+        # Remove old gradient
         if self.gradient_image is not None:
             try:
                 self.gradient_image.remove()
-            except Exception:
+            except:
                 pass
-
-        # display the gradient image below the plot - always 400-700nm
-        # The gradient now accurately represents the wavelength at each x position
-        self.gradient_image = self.ax.imshow(colors, extent=[xmin, xmax, ymin, ymax], 
-                                             aspect='auto', zorder=1, alpha=0.6)
-
-        # create polygon for area under curve and clip the gradient to it
-        verts = np.column_stack([x, y])
-        verts = np.vstack([[x[0], ymin], verts, [x[-1], ymin]])
-        poly = Polygon(verts, closed=True, transform=self.ax.transData)
-        self.gradient_image.set_clip_path(poly)
-
-        # draw the line on top
+        
+        # Create new gradient with updated extent
+        self.gradient_image = self.ax.imshow(
+            self._gradient_cache, 
+            extent=[xmin, xmax, ymin, ymax], 
+            aspect='auto', 
+            zorder=1, 
+            alpha=0.6
+        )
+        
         self.line.set_zorder(2)
         self.line.set_color('black')
-
-        self.canvas.draw_idle()
 
 
 def main():
     app = QApplication(sys.argv)
-    url = "http://192.168.137.158:8080/video"
-    url = "test_emission_spectrum.jpg"  # for testing with static image
+    url = "http://192.168.137.41:8080//video"
+    # url = "test_emission_spectrum.jpg"  # for testing with static image
     w = MainWindow(url)
     w.resize(1200, 700)
     w.show()
